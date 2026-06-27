@@ -399,6 +399,16 @@ OVERPASS_URLS = [
     "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
+GOOGLE_PLACES_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "").strip()
+GOOGLE_PLACES_URL = "https://places.googleapis.com/v1/places:searchNearby"
+GOOGLE_TYPES_PHARMACY = ["pharmacy", "drugstore"]
+GOOGLE_TYPES_CLINIC = ["doctor", "hospital", "medical_lab", "dental_clinic", "physiotherapist"]
+GOOGLE_FIELD_MASK = (
+    "places.id,places.displayName,places.location,places.formattedAddress,"
+    "places.nationalPhoneNumber,places.regularOpeningHours.weekdayDescriptions,"
+    "places.types,places.primaryType,places.businessStatus"
+)
+
 
 def _osm_tag_to_type(tags: dict) -> Optional[FacilityType]:
     amenity = (tags.get("amenity") or "").lower()
@@ -444,6 +454,92 @@ async def _overpass_query(lat: float, lng: float, radius_m: int) -> list[dict]:
     return []
 
 
+async def _google_places_nearby(lat: float, lng: float, radius_m: int, ftype: Optional[str]) -> list[dict]:
+    """Query Google Places API (New) - searchNearby. Returns list of normalised facility dicts.
+    Returns [] if key missing or call fails (so caller can fall back to OSM)."""
+    if not GOOGLE_PLACES_KEY:
+        return []
+    if ftype == "pharmacy":
+        included = GOOGLE_TYPES_PHARMACY
+    elif ftype == "clinic":
+        included = GOOGLE_TYPES_CLINIC
+    else:
+        included = GOOGLE_TYPES_PHARMACY + GOOGLE_TYPES_CLINIC
+    body = {
+        "includedTypes": included,
+        "maxResultCount": 20,
+        "locationRestriction": {
+            "circle": {
+                "center": {"latitude": lat, "longitude": lng},
+                "radius": float(min(radius_m, 50000)),
+            }
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_PLACES_KEY,
+        "X-Goog-FieldMask": GOOGLE_FIELD_MASK,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as cli:
+            r = await cli.post(GOOGLE_PLACES_URL, headers=headers, json=body)
+            if r.status_code != 200:
+                return []
+            data = r.json() or {}
+    except Exception:
+        return []
+    out: list[dict] = []
+    for p in data.get("places", []) or []:
+        ptypes = set(p.get("types") or [])
+        primary = (p.get("primaryType") or "").lower()
+        if primary in {"pharmacy", "drugstore"} or ptypes & {"pharmacy", "drugstore"}:
+            mapped = "pharmacy"
+        elif primary in {"doctor", "hospital", "medical_lab", "dental_clinic", "physiotherapist"} or ptypes & {
+            "doctor", "hospital", "medical_lab", "dental_clinic", "physiotherapist",
+        }:
+            mapped = "clinic"
+        else:
+            continue
+        if ftype and mapped != ftype:
+            continue
+        loc = p.get("location") or {}
+        flat, flon = loc.get("latitude"), loc.get("longitude")
+        if flat is None or flon is None:
+            continue
+        name = (p.get("displayName") or {}).get("text") or p.get("formattedAddress")
+        if not name:
+            continue
+        pid = p.get("id") or ""
+        out.append({
+            "id": f"gp-{pid}",
+            "name": name,
+            "type": mapped,
+            "address": p.get("formattedAddress") or "Address not listed",
+            "city": "",
+            "state": "",
+            "latitude": flat,
+            "longitude": flon,
+            "phone": p.get("nationalPhoneNumber"),
+            "image_url": None,
+            "student_friendly": False,
+            "student_discount_pct": 0,
+            "verified": False,
+            "open_hours": (
+                ", ".join((p.get("regularOpeningHours") or {}).get("weekdayDescriptions") or [])[:120]
+                or "Hours not listed"
+            ),
+            "services": [],
+            "medicines": [],
+            "geohash": geohash_encode(flat, flon, 9),
+            "owner_user_id": None,
+            "source": "google",
+            "google_place_id": pid,
+            "business_status": p.get("businessStatus"),
+            "discovered_at": datetime.now(timezone.utc).isoformat(),
+        })
+    return out
+
+
 @api.get("/facilities/discover", response_model=List[FacilityOut])
 async def discover(
     lat: float = Query(...),
@@ -451,61 +547,94 @@ async def discover(
     radius_m: int = Query(2000, ge=100, le=10000),
     type: Optional[FacilityType] = None,
 ):
-    """Discover real-world clinics/pharmacies via OpenStreetMap Overpass.
-    Results are cached in `osm_facilities` so they get the same FacilityOut shape
-    and can be claimed/inspected like seeded facilities."""
-    elements = await _overpass_query(lat, lng, radius_m)
+    """Discover real-world clinics/pharmacies near a location.
+    Order of providers: Google Places (New) → OpenStreetMap Overpass fallback.
+    Cached for 15 min by lat/lng bucket so repeated filter taps don't burn quota."""
+    # 15-min cache by (lat bucket, lng bucket, type, radius bucket)
+    bucket_size = 0.005  # ~500 m
+    lat_b = round(lat / bucket_size) * bucket_size
+    lng_b = round(lng / bucket_size) * bucket_size
+    rad_b = round(radius_m / 1000)
+    cache_key = f"{lat_b:.4f}_{lng_b:.4f}_{type or 'all'}_{rad_b}"
+    cached = await db.discover_cache.find_one({"key": cache_key}, {"_id": 0})
+    now = datetime.now(timezone.utc)
+    if cached:
+        ts = datetime.fromisoformat(cached["cached_at"])
+        if (now - ts).total_seconds() < 900:  # 15 min
+            facilities = cached.get("facilities") or []
+            results = [await _facility_doc_to_out(f, lat, lng) for f in facilities]
+            results = [r for r in results if r["distance_m"] is not None and r["distance_m"] <= radius_m]
+            results.sort(key=lambda x: x["distance_m"] or 0)
+            return results
+
+    # Primary: Google Places
+    docs = await _google_places_nearby(lat, lng, radius_m, type)
+    used = "google"
+
+    # Fallback: OSM Overpass (only if Google returns nothing)
+    if not docs:
+        used = "osm"
+        elements = await _overpass_query(lat, lng, radius_m)
+        for el in elements:
+            tags = el.get("tags") or {}
+            ftype = _osm_tag_to_type(tags)
+            if not ftype:
+                continue
+            if type and ftype != type:
+                continue
+            name = tags.get("name") or tags.get("brand") or tags.get("operator")
+            if not name:
+                continue
+            if "lat" in el and "lon" in el:
+                flat, flon = el["lat"], el["lon"]
+            elif "center" in el:
+                flat, flon = el["center"]["lat"], el["center"]["lon"]
+            else:
+                continue
+            osm_id = f"osm-{el.get('type', 'n')}-{el.get('id')}"
+            docs.append({
+                "id": osm_id,
+                "name": name,
+                "type": ftype,
+                "address": _osm_address(tags),
+                "city": tags.get("addr:city") or "",
+                "state": tags.get("addr:state") or "",
+                "latitude": flat,
+                "longitude": flon,
+                "phone": tags.get("phone") or tags.get("contact:phone"),
+                "image_url": None,
+                "student_friendly": False,
+                "student_discount_pct": 0,
+                "verified": False,
+                "open_hours": tags.get("opening_hours") or "Hours not listed",
+                "services": [],
+                "medicines": [],
+                "geohash": geohash_encode(flat, flon, 9),
+                "owner_user_id": None,
+                "source": "osm",
+                "osm_tags": tags,
+                "discovered_at": now.isoformat(),
+            })
+
+    # Cache facility docs by id (so detail page works) and also store cache key
+    for d in docs:
+        await db.osm_facilities.update_one({"id": d["id"]}, {"$set": d}, upsert=True)
+    await db.discover_cache.update_one(
+        {"key": cache_key},
+        {"$set": {"key": cache_key, "facilities": docs, "provider": used, "cached_at": now.isoformat()}},
+        upsert=True,
+    )
+
+    # De-dup with already-verified DB facilities by name + proximity
     results: list[dict] = []
-    for el in elements:
-        tags = el.get("tags") or {}
-        ftype = _osm_tag_to_type(tags)
-        if not ftype:
-            continue
-        if type and ftype != type:
-            continue
-        name = tags.get("name") or tags.get("brand") or tags.get("operator")
-        if not name:
-            continue
-        if "lat" in el and "lon" in el:
-            flat, flon = el["lat"], el["lon"]
-        elif "center" in el:
-            flat, flon = el["center"]["lat"], el["center"]["lon"]
-        else:
-            continue
-        osm_id = f"osm-{el.get('type', 'n')}-{el.get('id')}"
-        doc = {
-            "id": osm_id,
-            "name": name,
-            "type": ftype,
-            "address": _osm_address(tags),
-            "city": tags.get("addr:city") or "",
-            "state": tags.get("addr:state") or "",
-            "latitude": flat,
-            "longitude": flon,
-            "phone": tags.get("phone") or tags.get("contact:phone"),
-            "image_url": None,
-            "student_friendly": False,
-            "student_discount_pct": 0,
-            "verified": False,
-            "open_hours": tags.get("opening_hours") or "Hours not listed",
-            "services": [],
-            "medicines": [],
-            "geohash": geohash_encode(flat, flon, 9),
-            "owner_user_id": None,
-            "source": "osm",
-            "osm_tags": tags,
-            "discovered_at": datetime.now(timezone.utc).isoformat(),
-        }
-        # Cache (upsert) so detail page works later
-        await db.osm_facilities.update_one({"id": osm_id}, {"$set": doc}, upsert=True)
-        # Skip if already promoted into our verified collection by name+coords
+    for d in docs:
         existing = await db.facilities.find_one(
-            {"name": name, "latitude": {"$gte": flat - 0.0005, "$lte": flat + 0.0005}},
+            {"name": d["name"], "latitude": {"$gte": d["latitude"] - 0.0005, "$lte": d["latitude"] + 0.0005}},
             {"_id": 0, "id": 1},
         )
         if existing:
             continue
-        results.append(await _facility_doc_to_out(doc, lat, lng))
+        results.append(await _facility_doc_to_out(d, lat, lng))
     results = [r for r in results if r["distance_m"] is not None and r["distance_m"] <= radius_m]
     results.sort(key=lambda x: x["distance_m"] or 0)
     return results

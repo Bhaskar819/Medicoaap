@@ -243,10 +243,10 @@ export default function PatientHome() {
                       <Ionicons name="shield-checkmark" size={11} color={colors.onBrand} />
                       <Text style={styles.verifiedText}>{t("verified")}</Text>
                     </View>
-                  ) : (item as any).source === "osm" ? (
-                    <View style={styles.unverifiedPill} testID={`osm-${item.id}`}>
-                      <Ionicons name="map" size={10} color={colors.info} />
-                      <Text style={styles.unverifiedText}>OSM</Text>
+                  ) : (item as any).source === "osm" || (item as any).source === "google" ? (
+                    <View style={styles.unverifiedPill} testID={`unverified-${item.id}`}>
+                      <Ionicons name="alert-circle-outline" size={11} color={colors.info} />
+                      <Text style={styles.unverifiedText}>Unverified</Text>
                     </View>
                   ) : null}
                 </View>
