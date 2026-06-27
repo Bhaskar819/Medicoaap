@@ -1,6 +1,7 @@
 """Aarogya Aggregator - Hyper-local Healthcare Aggregator MVP backend."""
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import uuid
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
 
+import httpx
 import jwt
 from bson import ObjectId  # noqa: F401  (imported for completeness)
 from dotenv import load_dotenv
@@ -391,11 +393,132 @@ async def nearby(
     return results
 
 
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
+
+
+def _osm_tag_to_type(tags: dict) -> Optional[FacilityType]:
+    amenity = (tags.get("amenity") or "").lower()
+    healthcare = (tags.get("healthcare") or "").lower()
+    shop = (tags.get("shop") or "").lower()
+    if amenity == "pharmacy" or healthcare == "pharmacy" or shop == "chemist":
+        return "pharmacy"
+    if amenity in ("clinic", "doctors", "hospital") or healthcare in ("clinic", "doctor", "centre", "hospital"):
+        return "clinic"
+    return None
+
+
+def _osm_address(tags: dict) -> str:
+    parts = []
+    for k in ("addr:housenumber", "addr:street", "addr:suburb", "addr:city"):
+        v = tags.get(k)
+        if v:
+            parts.append(v)
+    return ", ".join(parts) or tags.get("addr:full") or "Address not listed"
+
+
+async def _overpass_query(lat: float, lng: float, radius_m: int) -> list[dict]:
+    radius_m = min(max(radius_m, 100), 10000)
+    q = (
+        f"[out:json][timeout:20];"
+        f"("
+        f"  node['amenity'~'pharmacy|clinic|doctors|hospital'](around:{radius_m},{lat},{lng});"
+        f"  node['healthcare'~'pharmacy|clinic|doctor|centre|hospital'](around:{radius_m},{lat},{lng});"
+        f"  node['shop'='chemist'](around:{radius_m},{lat},{lng});"
+        f"  way['amenity'~'pharmacy|clinic|doctors|hospital'](around:{radius_m},{lat},{lng});"
+        f"  way['healthcare'~'pharmacy|clinic|doctor|centre|hospital'](around:{radius_m},{lat},{lng});"
+        f");"
+        f"out center tags;"
+    )
+    async with httpx.AsyncClient(timeout=25, headers={"User-Agent": "AarogyaAggregator/1.0"}) as cli:
+        for url in OVERPASS_URLS:
+            try:
+                r = await cli.post(url, data={"data": q})
+                if r.status_code == 200:
+                    return r.json().get("elements", []) or []
+            except Exception:
+                continue
+    return []
+
+
+@api.get("/facilities/discover", response_model=List[FacilityOut])
+async def discover(
+    lat: float = Query(...),
+    lng: float = Query(...),
+    radius_m: int = Query(2000, ge=100, le=10000),
+    type: Optional[FacilityType] = None,
+):
+    """Discover real-world clinics/pharmacies via OpenStreetMap Overpass.
+    Results are cached in `osm_facilities` so they get the same FacilityOut shape
+    and can be claimed/inspected like seeded facilities."""
+    elements = await _overpass_query(lat, lng, radius_m)
+    results: list[dict] = []
+    for el in elements:
+        tags = el.get("tags") or {}
+        ftype = _osm_tag_to_type(tags)
+        if not ftype:
+            continue
+        if type and ftype != type:
+            continue
+        name = tags.get("name") or tags.get("brand") or tags.get("operator")
+        if not name:
+            continue
+        if "lat" in el and "lon" in el:
+            flat, flon = el["lat"], el["lon"]
+        elif "center" in el:
+            flat, flon = el["center"]["lat"], el["center"]["lon"]
+        else:
+            continue
+        osm_id = f"osm-{el.get('type', 'n')}-{el.get('id')}"
+        doc = {
+            "id": osm_id,
+            "name": name,
+            "type": ftype,
+            "address": _osm_address(tags),
+            "city": tags.get("addr:city") or "",
+            "state": tags.get("addr:state") or "",
+            "latitude": flat,
+            "longitude": flon,
+            "phone": tags.get("phone") or tags.get("contact:phone"),
+            "image_url": None,
+            "student_friendly": False,
+            "student_discount_pct": 0,
+            "verified": False,
+            "open_hours": tags.get("opening_hours") or "Hours not listed",
+            "services": [],
+            "medicines": [],
+            "geohash": geohash_encode(flat, flon, 9),
+            "owner_user_id": None,
+            "source": "osm",
+            "osm_tags": tags,
+            "discovered_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # Cache (upsert) so detail page works later
+        await db.osm_facilities.update_one({"id": osm_id}, {"$set": doc}, upsert=True)
+        # Skip if already promoted into our verified collection by name+coords
+        existing = await db.facilities.find_one(
+            {"name": name, "latitude": {"$gte": flat - 0.0005, "$lte": flat + 0.0005}},
+            {"_id": 0, "id": 1},
+        )
+        if existing:
+            continue
+        results.append(await _facility_doc_to_out(doc, lat, lng))
+    results = [r for r in results if r["distance_m"] is not None and r["distance_m"] <= radius_m]
+    results.sort(key=lambda x: x["distance_m"] or 0)
+    return results
+
+
 @api.get("/facilities/{fid}", response_model=FacilityOut)
 async def get_facility(fid: str, lat: Optional[float] = None, lng: Optional[float] = None):
     f = await db.facilities.find_one({"id": fid}, {"_id": 0})
     if not f:
-        raise HTTPException(404, "Facility not found")
+        # Could be a discovered OSM facility (cached)
+        f = await db.osm_facilities.find_one({"id": fid}, {"_id": 0})
+        if not f:
+            raise HTTPException(404, "Facility not found")
     return await _facility_doc_to_out(f, lat, lng)
 
 

@@ -21,7 +21,7 @@ type Facility = {
   image_url?: string;
 };
 
-const RADII = [500, 1000, 2000, 5000];
+const RADII = [500, 1000, 2000, 5000, 10000];
 
 export default function PatientHome() {
   const router = useRouter();
@@ -73,9 +73,21 @@ export default function PatientHome() {
       });
       if (type !== "all") params.set("type", type);
       if (studentOnly) params.set("student_only", "true");
-      const data = await apiFetch(`/facilities/nearby?${params.toString()}`);
-      setItems(data || []);
-    } catch (e) {
+      const [verified, discovered] = await Promise.all([
+        apiFetch(`/facilities/nearby?${params.toString()}`).catch(() => []),
+        studentOnly
+          ? Promise.resolve([])
+          : apiFetch(`/facilities/discover?${params.toString()}`).catch(() => []),
+      ]);
+      // Tag and merge: verified ones first, then discovered (OSM) sorted by distance
+      const v = (verified || []).map((f: any) => ({ ...f, source: "db" }));
+      const d = (discovered || []).map((f: any) => ({ ...f, source: "osm" }));
+      // Deduplicate by id
+      const seen = new Set(v.map((x: any) => x.id));
+      const merged = [...v, ...d.filter((x: any) => !seen.has(x.id))];
+      merged.sort((a, b) => (a.distance_m ?? 0) - (b.distance_m ?? 0));
+      setItems(merged);
+    } catch {
       setItems([]);
     } finally {
       setLoading(false);
@@ -231,6 +243,11 @@ export default function PatientHome() {
                       <Ionicons name="shield-checkmark" size={11} color={colors.onBrand} />
                       <Text style={styles.verifiedText}>{t("verified")}</Text>
                     </View>
+                  ) : (item as any).source === "osm" ? (
+                    <View style={styles.unverifiedPill} testID={`osm-${item.id}`}>
+                      <Ionicons name="map" size={10} color={colors.info} />
+                      <Text style={styles.unverifiedText}>OSM</Text>
+                    </View>
                   ) : null}
                 </View>
                 <Text style={styles.cardName} numberOfLines={1}>{item.name}</Text>
@@ -318,6 +335,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.brand, paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill,
   },
   verifiedText: { color: colors.onBrand, fontSize: font.sm - 2, fontWeight: "700" },
+  unverifiedPill: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    backgroundColor: colors.surfaceTertiary, paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill,
+  },
+  unverifiedText: { color: colors.info, fontSize: font.sm - 2, fontWeight: "700" },
   cardName: { fontSize: font.lg, fontWeight: "700", color: colors.onSurface, marginTop: 4 },
   cardAddress: { fontSize: font.sm, color: colors.muted },
   cardFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.xs },
