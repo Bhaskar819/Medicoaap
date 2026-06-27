@@ -1,0 +1,168 @@
+{
+  "app_name": "Aarogya Aggregator",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A clean, trustworthy, and highly readable healthcare platform optimized for speed and clarity in local discovery.",
+  "color": {
+    "surface": "#F9FAF9",
+    "onSurface": "#1C201D",
+    "surfaceSecondary": "#FFFFFF",
+    "onSurfaceSecondary": "#1C201D",
+    "surfaceTertiary": "#EAEFEA",
+    "onSurfaceTertiary": "#2C362F",
+    "surfaceInverse": "#1C201D",
+    "onSurfaceInverse": "#FFFFFF",
+    "brand": "#0F6C47",
+    "brandPrimary": "#0F6C47",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#198559",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#E2F1EB",
+    "onBrandTertiary": "#0F6C47",
+    "success": "#128256",
+    "onSuccess": "#FFFFFF",
+    "warning": "#D97726",
+    "onWarning": "#FFFFFF",
+    "error": "#B83A3A",
+    "onError": "#FFFFFF",
+    "info": "#4A6054",
+    "onInfo": "#FFFFFF",
+    "border": "#E1E6E2",
+    "borderStrong": "#C2CBC4",
+    "divider": "#EAF0EB"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Geist",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous iOS-style vertical rhythms. Elements should breathe, ensuring tap targets are clearly separated and the map feels expansive.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "1",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Top floating search and filter chips overlaid on the map",
+      "Bottom tab bar background",
+      "Sticky 'Stock Check' CTA container at the bottom of the pharmacy detail screen",
+      "Bottom sheet drag handles"
+    ],
+    "dont's": [
+      "Body content cards",
+      "List items",
+      "Form inputs"
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler",
+    "maps": "react-native-maps"
+  },
+  "screens": [
+    {
+      "name": "PatientHomeMap",
+      "purpose": "A map-first discovery view that auto-zooms to the user's location, allowing them to filter and find verified local clinics and pharmacies.",
+      "states": {
+        "loading": "Map skeleton or centered spinner over a soft map placeholder.",
+        "empty": "No facilities found in this radius. Show an illustration and a prompt to expand the search radius to 5km.",
+        "error": "Failed to load location or map data. Show a retry button overlay."
+      },
+      "layout": "Flex 1 map view occupying the entire screen under the safe area. At the top (absolute positioned), a frosted glass search bar followed by horizontal scrollable filter chips (Radius: 500m/1km/2km/5km, Type: Clinic/Pharmacy). An interactive bottom sheet (@gorhom/bottom-sheet) sits at the bottom showing a quick list of clustered results nearby."
+    },
+    {
+      "name": "FacilityDetail",
+      "purpose": "Provides rich, trusted data about a specific clinic or pharmacy, emphasizing inspector verification and actionable steps like 'Stock Check'.",
+      "states": {
+        "loading": "Skeleton of the hero image and content blocks.",
+        "empty": "N/A - Detail screen implies data exists.",
+        "error": "Failed to load facility data. Retry CTA."
+      },
+      "layout": "Scrollable view. Top section: Hero image of the exterior with a top-to-bottom gradient scrim. Overlaid text at the bottom of the hero includes Facility Name and a prominent 'Verified' pill (brandPrimary bg with check icon). Below hero: 'Student Friendly' banner (warning bg) if applicable. Next section: Inspector Ratings displayed as distinct progress bars/metrics (Cleanliness, Transparency, Equipment) vs standard 5-star user reviews below them. Bottom: Sticky absolute CTA for 'Stock Check' (pharmacies) or 'Call to Book' (clinics)."
+    },
+    {
+      "name": "ClinicDashboard",
+      "purpose": "A command center for facility owners to manage their listing, answer stock checks, and update student-friendly tags.",
+      "states": {
+        "loading": "Spinner centered.",
+        "empty": "No active stock requests.",
+        "error": "Could not load dashboard data."
+      },
+      "layout": "Stack navigation. Header displays Facility Name. Main body contains a grid of quick-action cards (Edit Listing, Toggle Student Friendly). Below the grid: a priority list of incoming 'Stock Check' requests from patients needing immediate Yes/No responses."
+    },
+    {
+      "name": "AdminInspectorDashboard",
+      "purpose": "Allows admins/inspectors to view pending verifications, upload reports, and adjust trusted ratings.",
+      "states": {
+        "loading": "Skeleton list of facilities.",
+        "empty": "No facilities pending inspection in your assigned region.",
+        "error": "Failed to sync inspection assignments."
+      },
+      "layout": "Stack navigation. A clean, utilitarian list view of facilities marked 'Pending Inspection'. Tapping one opens an Inspector Form with segmented controls for ratings (Cleanliness, Transparency, Equipment), an image uploader for reports, and a master toggle to grant the 'Verified' badge."
+    }
+  ],
+  "images": {
+    "hero_pharmacy": {
+      "url": "https://images.pexels.com/photos/35576362/pexels-photo-35576362.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Pharmacy exterior with bright green cross sign at night"
+    },
+    "hero_clinic": {
+      "url": "https://images.pexels.com/photos/6473188/pexels-photo-6473188.jpeg",
+      "alt": "Modern clinic building with red and white facade"
+    },
+    "empty_map": {
+      "url": "https://images.pexels.com/photos/7966689/pexels-photo-7966689.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Vintage map empty state illustration"
+    },
+    "doctor_consult": {
+      "url": "https://images.pexels.com/photos/7659869/pexels-photo-7659869.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Patient consulting a doctor"
+    }
+  },
+  "haptics": {
+    "filter_chip_tap": "light",
+    "stock_check_button": "medium",
+    "map_pin_select": "light",
+    "verified_toggle": "success"
+  },
+  "instructions_to_main_agent": [
+    "Build the Patient Map screen using react-native-maps. Ensure the map occupies `flex: 1` at the root, and all UI elements (search, chips, buttons) float above it using `absolute` positioning and safe area insets.",
+    "Implement the filter chip row (Radius & Type) as a horizontally scrollable list wrapped in a glassmorphism container.",
+    "Use `@gorhom/bottom-sheet` on the Patient Map screen to show a list of nearby clinics. It should overlay the bottom of the map.",
+    "In the FacilityDetail screen, distinctly separate 'Inspector Ratings' from normal 'User Reviews'. Inspector Ratings (Cleanliness, Transparency, Equipment) should use horizontal progress bars or specific metric cards, not stars.",
+    "Render the 'Verified' badge using the `brandPrimary` color as a solid pill with a check icon to ensure it carries maximum trust weight.",
+    "The 'Student Friendly' tag should use the `warning` color (ochre) as it draws attention without looking like an error.",
+    "The 'Stock Check' button must be sticky at the bottom of the screen (using absolute positioning or KeyboardAvoidingView wrapper) so it's always accessible without scrolling to the bottom of the details page.",
+    "Ensure multi-language support structures (i18n context/wrappers) are stubbed out, as the app needs to support Hindi, English, Tamil, Telugu, Bengali, Marathi.",
+    "Implement haptics as defined in the haptics block (filter chip tap, map pin select, stock check).",
+    "Remember to apply a vertical gradient scrim (transparent to surfaceInverse) over the hero images in the detail screen so the overlaid text is perfectly readable."
+  ]
+}
