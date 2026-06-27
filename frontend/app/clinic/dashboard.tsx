@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 
 import { useAuth } from "@/src/auth";
 import { useI18n } from "@/src/i18n";
@@ -11,6 +11,8 @@ import { colors, font, radius, spacing, shadow } from "@/src/theme";
 export default function ClinicDashboard() {
   const { apiFetch, signOut, session } = useAuth();
   const { t } = useI18n();
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [facilities, setFacilities] = useState<any[]>([]);
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,7 +59,7 @@ export default function ClinicDashboard() {
       {loading ? (
         <ActivityIndicator color={colors.brand} style={{ marginTop: spacing.xl }} />
       ) : (
-        <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+        <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 100 }}>
           <Text style={styles.section}>My facilities</Text>
           {facilities.length === 0 ? (
             <Text style={styles.empty}>No facilities yet — contact admin.</Text>
@@ -110,6 +112,15 @@ export default function ClinicDashboard() {
           ))}
         </ScrollView>
       )}
+
+      <Pressable
+        testID="add-facility-fab"
+        onPress={() => router.push("/clinic/new")}
+        style={[styles.fab, { bottom: Math.max(insets.bottom, 12) + 16 }]}
+      >
+        <Ionicons name="add" size={22} color={colors.onBrand} />
+        <Text style={styles.fabText}>Add facility</Text>
+      </Pressable>
     </SafeAreaView>
   );
 }
@@ -141,4 +152,11 @@ const styles = StyleSheet.create({
   reqMed: { fontSize: font.lg, fontWeight: "800", color: colors.onSurface },
   reqMeta: { color: colors.muted, fontSize: font.sm, marginTop: 2 },
   respBtn: { flex: 1, paddingVertical: 10, borderRadius: radius.md, alignItems: "center" },
+  fab: {
+    position: "absolute", right: spacing.lg,
+    flexDirection: "row", alignItems: "center", gap: 8,
+    paddingHorizontal: 18, paddingVertical: 14, borderRadius: radius.pill,
+    backgroundColor: colors.brand, ...shadow.floating,
+  },
+  fabText: { color: colors.onBrand, fontWeight: "800", fontSize: font.base },
 });
