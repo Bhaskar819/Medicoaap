@@ -15,6 +15,7 @@ export default function ClinicDashboard() {
   const insets = useSafeAreaInsets();
   const [facilities, setFacilities] = useState<any[]>([]);
   const [requests, setRequests] = useState<any[]>([]);
+  const [incomingCards, setIncomingCards] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -22,8 +23,12 @@ export default function ClinicDashboard() {
     try {
       const my = await apiFetch("/facilities/owner/mine");
       setFacilities(my || []);
-      const all = await Promise.all((my || []).map((f: any) => apiFetch(`/stock-requests/facility/${f.id}`)));
-      setRequests(all.flat());
+      const [reqs, cards] = await Promise.all([
+        Promise.all((my || []).map((f: any) => apiFetch(`/stock-requests/facility/${f.id}`))).then((r) => r.flat()),
+        Promise.all((my || []).map((f: any) => apiFetch(`/symptom-cards/facility/${f.id}`))).then((r) => r.flat()),
+      ]);
+      setRequests(reqs);
+      setIncomingCards(cards);
     } finally { setLoading(false); }
   }, [apiFetch]);
 
@@ -84,6 +89,32 @@ export default function ClinicDashboard() {
                   {f.student_friendly ? "Student friendly ON" : "Set student friendly"}
                 </Text>
               </Pressable>
+            </View>
+          ))}
+
+          <Text style={[styles.section, { marginTop: spacing.xl }]}>Incoming patient symptom cards</Text>
+          {incomingCards.length === 0 ? (
+            <Text style={styles.empty}>No patient cards shared yet.</Text>
+          ) : incomingCards.map((s) => (
+            <View key={s.id} style={styles.reqCard} testID={`incoming-card-${s.id}`}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={styles.reqMed}>{s.card?.primary_symptom || "Symptoms"}</Text>
+                <View style={[styles.urgPill, {
+                  backgroundColor: s.card?.urgency === "high" ? colors.error
+                    : s.card?.urgency === "medium" ? colors.warning : colors.brand
+                }]}>
+                  <Text style={styles.urgPillText}>{(s.card?.urgency || "low").toUpperCase()}</Text>
+                </View>
+              </View>
+              <Text style={styles.reqMeta}>
+                {s.patient_name} · {s.patient_phone || "no phone"} · {s.card?.duration || ""} · severity {s.card?.severity || "?"}/10
+              </Text>
+              {s.card?.patient_note ? (
+                <Text style={styles.cardNote}>"{s.card.patient_note}"</Text>
+              ) : null}
+              {s.card?.suggested_specialty ? (
+                <Text style={styles.reqMeta}>Specialty: {s.card.suggested_specialty}</Text>
+              ) : null}
             </View>
           ))}
 
@@ -152,6 +183,9 @@ const styles = StyleSheet.create({
   reqMed: { fontSize: font.lg, fontWeight: "800", color: colors.onSurface },
   reqMeta: { color: colors.muted, fontSize: font.sm, marginTop: 2 },
   respBtn: { flex: 1, paddingVertical: 10, borderRadius: radius.md, alignItems: "center" },
+  urgPill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill },
+  urgPillText: { color: "#fff", fontWeight: "800", fontSize: font.sm - 2, letterSpacing: 0.5 },
+  cardNote: { marginTop: 6, fontStyle: "italic", color: colors.onSurfaceTertiary, fontSize: font.sm, lineHeight: 18 },
   fab: {
     position: "absolute", right: spacing.lg,
     flexDirection: "row", alignItems: "center", gap: 8,

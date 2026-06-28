@@ -5,7 +5,7 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-export type Lang = "en" | "hi" | "ta" | "te" | "bn" | "mr";
+export type Lang = "en" | "hi" | "ta" | "te" | "bn" | "mr" | "gu" | "kn" | "ml" | "pa" | "ur" | "or" | "as";
 
 export const LANGUAGES: { code: Lang; label: string; native: string }[] = [
   { code: "en", label: "English", native: "English" },
@@ -14,7 +14,16 @@ export const LANGUAGES: { code: Lang; label: string; native: string }[] = [
   { code: "te", label: "Telugu", native: "తెలుగు" },
   { code: "bn", label: "Bengali", native: "বাংলা" },
   { code: "mr", label: "Marathi", native: "मराठी" },
+  { code: "gu", label: "Gujarati", native: "ગુજરાતી" },
+  { code: "kn", label: "Kannada", native: "ಕನ್ನಡ" },
+  { code: "ml", label: "Malayalam", native: "മലയാളം" },
+  { code: "pa", label: "Punjabi", native: "ਪੰਜਾਬੀ" },
+  { code: "ur", label: "Urdu", native: "اردو" },
+  { code: "or", label: "Odia", native: "ଓଡ଼ିଆ" },
+  { code: "as", label: "Assamese", native: "অসমীয়া" },
 ];
+
+const VALID_LANGS: Lang[] = ["en", "hi", "ta", "te", "bn", "mr", "gu", "kn", "ml", "pa", "ur", "or", "as"];
 
 const T = {
   app_name: { en: "Aarogya", hi: "आरोग्य", ta: "ஆரோக்கியம்", te: "ఆరోగ్యం", bn: "আরোগ্য", mr: "आरोग्य" },
@@ -73,7 +82,7 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [lang, setLangState] = useState<Lang>("en");
   useEffect(() => {
     AsyncStorage.getItem("lang").then((v) => {
-      if (v && ["en", "hi", "ta", "te", "bn", "mr"].includes(v)) setLangState(v as Lang);
+      if (v && VALID_LANGS.includes(v as Lang)) setLangState(v as Lang);
     });
   }, []);
   const setLang = (l: Lang) => {

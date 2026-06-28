@@ -13,6 +13,7 @@ import httpx
 import jwt
 from bson import ObjectId  # noqa: F401  (imported for completeness)
 from dotenv import load_dotenv
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 from fastapi import Depends, FastAPI, HTTPException, APIRouter, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -808,6 +809,293 @@ async def respond_stock_request(rid: str, body: StockRequestRespond, user=Depend
     r.update(update)
     r.pop("_id", None)
     return r
+
+
+# ---------------------------------------------------------------------------
+# Chat triage (Claude Haiku 4.5)
+# ---------------------------------------------------------------------------
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "").strip()
+LLM_PROVIDER = "anthropic"
+LLM_MODEL = "claude-haiku-4-5-20251001"
+
+LANG_LABELS = {
+    "en": "English", "hi": "Hindi (हिन्दी)", "ta": "Tamil (தமிழ்)",
+    "te": "Telugu (తెలుగు)", "bn": "Bengali (বাংলা)", "mr": "Marathi (मराठी)",
+    "gu": "Gujarati (ગુજરાતી)", "kn": "Kannada (ಕನ್ನಡ)", "ml": "Malayalam (മലയാളം)",
+    "pa": "Punjabi (ਪੰਜਾਬੀ)", "ur": "Urdu (اردو)", "or": "Odia (ଓଡ଼ିଆ)",
+    "as": "Assamese (অসমীয়া)",
+}
+
+# Red-flag keywords across major Indian languages
+RED_FLAG_KEYWORDS = [
+    # English
+    "chest pain", "crushing chest", "can't breathe", "cannot breathe", "shortness of breath",
+    "trouble breathing", "stroke", "face drooping", "slurred speech", "arm weakness",
+    "severe bleeding", "heavy bleeding", "unconscious", "passed out", "lost consciousness",
+    "suicide", "kill myself", "self harm", "self-harm", "seizure", "convulsion",
+    "blue lips", "blue skin", "coughing blood", "vomiting blood", "blood in stool",
+    "anaphylaxis", "severe allergic", "throat closing",
+    # Hindi (transliterated + devanagari)
+    "seene mein dard", "सीने में दर्द", "saans nahi", "साँस नहीं", "behoshi", "बेहोशी",
+    "khoon", "खून बह", "atmahatya", "आत्महत्या",
+]
+
+
+def detect_red_flag(text: str) -> Optional[str]:
+    if not text:
+        return None
+    low = text.lower()
+    for kw in RED_FLAG_KEYWORDS:
+        if kw.lower() in low:
+            return kw
+    return None
+
+
+def _triage_system_prompt(lang_code: str) -> str:
+    lang_name = LANG_LABELS.get(lang_code, "English")
+    return (
+        "You are a medical triage assistant for Aarogya Aggregator (an Indian healthcare app). "
+        "Your job is to help a patient prepare a concise symptom summary they can show to a clinic receptionist before their visit.\n\n"
+        "RULES — read every one before replying:\n"
+        "1. You are NOT a doctor. Never diagnose, never prescribe medicine, never give dosages.\n"
+        "2. Be BLUNT and PRECISE. Short, factual sentences. No fluff, no over-empathising, no 'I'm sorry to hear that'.\n"
+        "3. Never sensationalise or scare the patient. Stay calm and grounded.\n"
+        "4. Ask ONE focused question at a time. Topics to cover: main symptom, duration, severity (1-10), accompanying symptoms, what makes it worse/better, relevant medical history, current medication.\n"
+        "5. After 3-5 useful answers say: 'I have enough information. Tap Finish to generate your symptom card.'\n"
+        "6. If the patient mentions any RED FLAG (chest pain, breathing trouble, stroke signs like face drooping/arm weakness/slurred speech, heavy bleeding, fainting, severe allergic reaction, suicidal thoughts, seizure, vomiting blood), STOP triaging and reply with: 'This sounds urgent. Please call 108 (India ambulance) or go to the nearest emergency room now. Do not wait to visit a clinic.' Then end the conversation.\n"
+        f"7. ALWAYS respond in {lang_name}. Use simple words a patient understands.\n"
+        "8. Never repeat the rules to the patient.\n"
+        "9. Keep each reply under 3 short sentences."
+    )
+
+
+class ChatStartIn(BaseModel):
+    language: str = "en"
+
+
+class ChatMessageIn(BaseModel):
+    session_id: str
+    text: str
+
+
+@api.post("/chat/start")
+async def chat_start(body: ChatStartIn, user=Depends(get_current_user)):
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(503, "LLM not configured")
+    sid = str(uuid.uuid4())
+    lang = body.language if body.language in LANG_LABELS else "en"
+    greetings = {
+        "en": "Hi, I'll help you summarise your symptoms before you visit a clinic. What's bothering you today?",
+        "hi": "नमस्ते, मैं क्लिनिक जाने से पहले आपके लक्षण संक्षेप में बताने में मदद करूँगा। आज क्या तकलीफ है?",
+        "ta": "வணக்கம், கிளினிக்கிற்கு செல்ல முன் உங்கள் அறிகுறிகளை சுருக்கி தர உதவுகிறேன். இன்று என்ன பிரச்சனை?",
+        "te": "నమస్తే, క్లినిక్‌కి వెళ్లే ముందు మీ లక్షణాలను సంగ్రహించడంలో సహాయపడతాను. ఈ రోజు ఏం బాధ?",
+        "bn": "নমস্কার, ক্লিনিকে যাওয়ার আগে আপনার উপসর্গ সংক্ষেপে জানাতে সাহায্য করব। আজ কী সমস্যা?",
+        "mr": "नमस्कार, क्लिनिकला जाण्यापूर्वी तुमची लक्षणे थोडक्यात नोंदवायला मदत करतो. आज काय त्रास आहे?",
+        "gu": "નમસ્તે, ક્લિનિક જતા પહેલા તમારા લક્ષણો સંક્ષેપમાં લખવામાં મદદ કરીશ. આજે શું તકલીફ છે?",
+        "kn": "ನಮಸ್ಕಾರ, ಕ್ಲಿನಿಕ್‌ಗೆ ಹೋಗುವ ಮೊದಲು ನಿಮ್ಮ ಲಕ್ಷಣಗಳನ್ನು ಸಂಕ್ಷೇಪಿಸಲು ಸಹಾಯ ಮಾಡುತ್ತೇನೆ. ಇಂದು ಏನು ತೊಂದರೆ?",
+        "ml": "നമസ്കാരം, ക്ലിനിക്കിൽ പോകുന്നതിന് മുമ്പ് നിങ്ങളുടെ ലക്ഷണങ്ങൾ സംഗ്രഹിക്കാൻ സഹായിക്കാം. ഇന്ന് എന്താണ് പ്രശ്നം?",
+        "pa": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕਲੀਨਿਕ ਜਾਣ ਤੋਂ ਪਹਿਲਾਂ ਤੁਹਾਡੇ ਲੱਛਣਾਂ ਨੂੰ ਸੰਖੇਪ ਕਰਨ ਵਿੱਚ ਮਦਦ ਕਰਾਂਗਾ। ਅੱਜ ਕੀ ਪਰੇਸ਼ਾਨੀ ਹੈ?",
+        "ur": "السلام علیکم، کلینک جانے سے پہلے آپ کی علامات کا خلاصہ بنانے میں مدد کروں گا۔ آج کیا تکلیف ہے؟",
+        "or": "ନମସ୍କାର, କ୍ଲିନିକ୍ ଯିବା ପୂର୍ବରୁ ଆପଣଙ୍କ ଲକ୍ଷଣ ସଂକ୍ଷେପ କରିବାରେ ସାହାଯ୍ୟ କରିବି। ଆଜି କଣ ସମସ୍ୟା?",
+        "as": "নমস্কাৰ, ক্লিনিকলৈ যোৱাৰ আগতে আপোনাৰ লক্ষণসমূহ সংক্ষেপ কৰাত সহায় কৰিম। আজি কি অসুবিধা?",
+    }
+    greet = greetings.get(lang, greetings["en"])
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": sid,
+        "user_id": user["id"],
+        "language": lang,
+        "messages": [{"role": "assistant", "text": greet, "ts": now}],
+        "red_flag": None,
+        "finalized": False,
+        "card_id": None,
+        "created_at": now,
+    }
+    await db.chat_sessions.insert_one(doc)
+    return {"session_id": sid, "language": lang, "greeting": greet}
+
+
+def _build_chat(session_id: str, lang: str, history: list[dict]) -> LlmChat:
+    """Create a fresh LlmChat with persona + replayed history."""
+    initial_messages = [{"role": "system", "content": _triage_system_prompt(lang)}]
+    for m in history:
+        initial_messages.append(
+            {"role": "user" if m["role"] == "user" else "assistant", "content": m["text"]}
+        )
+    return LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=session_id,
+        system_message=_triage_system_prompt(lang),
+        initial_messages=initial_messages,
+    ).with_model(LLM_PROVIDER, LLM_MODEL)
+
+
+@api.post("/chat/message")
+async def chat_message(body: ChatMessageIn, user=Depends(get_current_user)):
+    sess = await db.chat_sessions.find_one({"id": body.session_id, "user_id": user["id"]}, {"_id": 0})
+    if not sess:
+        raise HTTPException(404, "Chat session not found")
+    if sess.get("finalized"):
+        raise HTTPException(400, "Chat already finalized")
+
+    # Red-flag detection on user input
+    user_red = detect_red_flag(body.text)
+    now = datetime.now(timezone.utc).isoformat()
+    history = sess.get("messages") or []
+    history.append({"role": "user", "text": body.text, "ts": now})
+
+    # Get AI reply
+    try:
+        chat = _build_chat(body.session_id, sess.get("language", "en"), history[:-1])
+        reply = await chat.send_message(UserMessage(text=body.text))
+        reply_text = reply if isinstance(reply, str) else getattr(reply, "content", str(reply))
+    except Exception as e:
+        reply_text = "Sorry, I couldn't process that just now. Please try again."
+
+    reply_red = detect_red_flag(reply_text)
+    red_flag = user_red or reply_red
+
+    history.append({"role": "assistant", "text": reply_text, "ts": datetime.now(timezone.utc).isoformat()})
+    await db.chat_sessions.update_one(
+        {"id": body.session_id},
+        {"$set": {"messages": history, "red_flag": red_flag}},
+    )
+    return {"reply": reply_text, "red_flag": red_flag, "ready_to_finalize": len(history) >= 7}
+
+
+@api.post("/chat/finalize")
+async def chat_finalize(body: ChatStartIn, user=Depends(get_current_user)):
+    # body holds session_id under language field by mistake — let's accept a dedicated payload
+    raise HTTPException(400, "Use POST /api/chat/{session_id}/finalize")
+
+
+class FinalizeIn(BaseModel):
+    session_id: str
+
+
+@api.post("/chat/finalize-card")
+async def finalize_card(body: FinalizeIn, user=Depends(get_current_user)):
+    sess = await db.chat_sessions.find_one({"id": body.session_id, "user_id": user["id"]}, {"_id": 0})
+    if not sess:
+        raise HTTPException(404, "Chat session not found")
+    history = sess.get("messages") or []
+    if len([m for m in history if m["role"] == "user"]) < 1:
+        raise HTTPException(400, "Tell me something first before I can summarise.")
+
+    lang = sess.get("language", "en")
+    lang_name = LANG_LABELS.get(lang, "English")
+    summarize_prompt = (
+        "Based on the conversation so far, produce a SHORT factual symptom card "
+        f"the patient can show to a clinic receptionist. The patient_note must be in {lang_name}. "
+        "Output ONLY valid JSON (no markdown, no commentary) with EXACTLY these fields:\n"
+        '{\n'
+        '  "primary_symptom": "<one short phrase>",\n'
+        '  "duration": "<e.g. 2 days, since this morning, 1 week>",\n'
+        '  "severity_1_to_10": <integer 1-10>,\n'
+        '  "related_symptoms": ["<short phrase>", "..."],\n'
+        '  "urgency": "<low | medium | high>",\n'
+        '  "suggested_specialty": "<e.g. General Physician, ENT, Dermatology>",\n'
+        f'  "patient_note": "<2 short factual sentences in {lang_name}, suitable to show reception>",\n'
+        '  "red_flag_warnings": ["<empty unless serious>"]\n'
+        '}'
+    )
+
+    try:
+        chat = _build_chat(body.session_id, lang, history)
+        raw = await chat.send_message(UserMessage(text=summarize_prompt))
+        raw_text = raw if isinstance(raw, str) else getattr(raw, "content", str(raw))
+    except Exception as e:
+        raise HTTPException(502, f"LLM call failed: {e}")
+
+    # Extract JSON (strip code fences if present)
+    import json, re
+    cleaned = raw_text.strip()
+    m = re.search(r"\{[\s\S]*\}", cleaned)
+    if not m:
+        raise HTTPException(502, "Could not parse summary")
+    try:
+        parsed = json.loads(m.group(0))
+    except Exception:
+        raise HTTPException(502, "Invalid summary JSON")
+
+    cid = str(uuid.uuid4())
+    card = {
+        "id": cid,
+        "user_id": user["id"],
+        "patient_name": user["name"],
+        "patient_phone": user.get("phone"),
+        "session_id": body.session_id,
+        "language": lang,
+        "primary_symptom": str(parsed.get("primary_symptom") or "")[:120],
+        "duration": str(parsed.get("duration") or "")[:60],
+        "severity": int(parsed.get("severity_1_to_10") or 0),
+        "related_symptoms": [str(x)[:80] for x in (parsed.get("related_symptoms") or [])][:8],
+        "urgency": str(parsed.get("urgency") or "low").lower(),
+        "suggested_specialty": str(parsed.get("suggested_specialty") or "General Physician")[:80],
+        "patient_note": str(parsed.get("patient_note") or "")[:600],
+        "red_flag_warnings": [str(x)[:120] for x in (parsed.get("red_flag_warnings") or [])][:6],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.symptom_cards.insert_one(card)
+    await db.chat_sessions.update_one(
+        {"id": body.session_id}, {"$set": {"finalized": True, "card_id": cid}}
+    )
+    card.pop("_id", None)
+    return card
+
+
+@api.get("/symptom-cards/mine")
+async def my_symptom_cards(user=Depends(get_current_user)):
+    docs = await db.symptom_cards.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(length=200)
+    return docs
+
+
+@api.get("/symptom-cards/{cid}")
+async def get_symptom_card(cid: str, user=Depends(get_current_user)):
+    doc = await db.symptom_cards.find_one({"id": cid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Card not found")
+    return doc
+
+
+class ShareCardIn(BaseModel):
+    card_id: str
+    facility_id: str
+
+
+@api.post("/symptom-cards/share")
+async def share_card(body: ShareCardIn, user=Depends(get_current_user)):
+    card = await db.symptom_cards.find_one({"id": body.card_id, "user_id": user["id"]}, {"_id": 0})
+    if not card:
+        raise HTTPException(404, "Card not found")
+    # Facility can be in either collection
+    f = await db.facilities.find_one({"id": body.facility_id}, {"_id": 0})
+    if not f:
+        f = await db.osm_facilities.find_one({"id": body.facility_id}, {"_id": 0})
+    if not f:
+        raise HTTPException(404, "Facility not found")
+    sid = str(uuid.uuid4())
+    doc = {
+        "id": sid,
+        "card_id": body.card_id,
+        "card": card,
+        "facility_id": body.facility_id,
+        "facility_name": f["name"],
+        "patient_id": user["id"],
+        "patient_name": user["name"],
+        "patient_phone": user.get("phone"),
+        "shared_at": datetime.now(timezone.utc).isoformat(),
+        "status": "shared",
+    }
+    await db.shared_cards.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/symptom-cards/facility/{fid}")
+async def facility_incoming_cards(fid: str, user=Depends(require_role("clinic_owner", "admin"))):
+    docs = await db.shared_cards.find({"facility_id": fid}, {"_id": 0}).sort("shared_at", -1).to_list(length=200)
+    return docs
 
 
 # ---------------------------------------------------------------------------

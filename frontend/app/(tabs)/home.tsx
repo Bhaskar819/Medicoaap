@@ -197,8 +197,7 @@ export default function PatientHome() {
       <View
         style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 8) + 70 }]}
         testID="results-sheet"
-      >
-        <View style={styles.sheetHandleWrap}><View style={styles.sheetHandle} /></View>
+      >        <View style={styles.sheetHandleWrap}><View style={styles.sheetHandle} /></View>
         <View style={styles.sheetHeader}>
           <Text style={styles.sheetTitle}>
             {loading ? t("loading") : `${items.length} ${items.length === 1 ? "place" : "places"}`}
@@ -279,6 +278,15 @@ export default function PatientHome() {
           />
         )}
       </View>
+
+      {/* Floating AI chat button */}
+      <Pressable
+        testID="chat-fab"
+        onPress={() => router.push("/chat")}
+        style={[styles.chatFab, { bottom: Math.max(insets.bottom, 8) + 240 }]}
+      >
+        <Ionicons name="chatbubble-ellipses" size={22} color={colors.onBrand} />
+      </Pressable>
     </View>
   );
 }
@@ -351,4 +359,9 @@ const styles = StyleSheet.create({
     gap: 4, backgroundColor: "#FCEFE0", paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill,
   },
   studentTagText: { color: colors.warning, fontWeight: "700", fontSize: font.sm - 1 },
+  chatFab: {
+    position: "absolute", right: spacing.lg, width: 56, height: 56, borderRadius: 28,
+    backgroundColor: colors.brand, alignItems: "center", justifyContent: "center",
+    ...shadow.floating,
+  },
 });
